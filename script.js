@@ -23,6 +23,8 @@ let startTime = null;
 let elapsedTime = 0;
 let isRunning = false;
 let animationFrameId = null;
+let isSyncing = false; // Verhindert Endlosschleifen bei Sync
+let syncRef = null; // Firebase Referenz
 
 const mainTimer = document.getElementById('mainTimer');
 const timerLabel = document.getElementById('timerLabel');
@@ -37,9 +39,91 @@ const progressPercentage = document.getElementById('progressPercentage');
 const progressFill = document.getElementById('progressFill');
 const progressMarkers = document.getElementById('progressMarkers');
 const upcomingScenesList = document.getElementById('upcomingScenesList');
+const menuContainer = document.getElementById('menuContainer');
 
 // Gesamtzeit des Films in Sekunden (2:24:30 = 8670 Sekunden)
 const TOTAL_FILM_TIME = 8670;
+
+// Menü-Struktur mit Zeit-Zuordnung
+const menuData = [
+    {
+        section: "Morgenmahl im Schloss",
+        time: 290, // 4:50
+        items: [
+            { name: "Muggle-Rührei Häppchen", description: "" },
+            { name: "Würstchen oder vegetarische Variante", description: "" },
+            { name: "Duftender Kräutertee", description: "" }
+        ]
+    },
+    {
+        section: "Kleine Zauberhappen",
+        time: 735, // 12:15
+        items: [
+            { name: "Keks aus der Schlossküche", description: "" }
+        ]
+    },
+    {
+        section: "Kleine Zauberhappen",
+        time: 950, // 15:50
+        items: [
+            { name: "Festtagskuchen", description: "Happy Birthday Harry Cake" }
+        ]
+    },
+    {
+        section: "Kleine Zauberhappen",
+        time: 1290, // 21:30
+        items: [
+            { name: "Butterbier", description: "" }
+        ]
+    },
+    {
+        section: "Kesselgerichte",
+        time: 1850, // 30:50
+        items: [
+            { name: "Cremige Kürbissuppe", description: "" }
+        ]
+    },
+    {
+        section: "Süßwaren aus Hogsmeade",
+        time: 2215, // 36:55
+        items: [
+            { name: "Auswahl verzauberter Leckereien", description: "" },
+            { name: "Bertie Botts Bohnen jeder Geschmacksrichtung", description: "" }
+        ]
+    },
+    {
+        section: "Festtafel der Großen Halle",
+        time: 2901, // 48:21
+        items: [
+            { name: "Brathähnchen mit Gemüse und Kartoffelpüree", description: "" },
+            { name: "Ofen-Gemüse", description: "Maiskolben, Brokkoli, Kohlsprossen" },
+            { name: "Teller mit frischen Früchten", description: "" }
+        ]
+    },
+    {
+        section: "Zaubertränke",
+        time: 3220, // 53:40
+        items: [
+            { name: "Schwarzer \"Trank des Todes\"", description: "Johannisbeersaft" },
+            { name: "Elixier der Grünen Quellen", description: "" },
+            { name: "Mondmilch-Trunk", description: "" }
+        ]
+    },
+    {
+        section: "Besondere Häppchen",
+        time: 4125, // 1:08:45
+        items: [
+            { name: "Goldener Schnatz – Snack", description: "" }
+        ]
+    },
+    {
+        section: "Kleine Zauberhappen",
+        time: 4290, // 1:11:30
+        items: [
+            { name: "Kürbiskuchen", description: "2tes Halloween Festmahl" }
+        ]
+    }
+];
 
 // Timeline rendern
 function renderTimeline() {
@@ -182,8 +266,108 @@ function updateTimer() {
     
     updateTimeline(elapsedTime);
     updateProgress(elapsedTime);
+    updateMenu(elapsedTime);
+    
+    // Sync alle 5 Sekunden während der Timer läuft (um Firebase-Limits nicht zu überschreiten)
+    if (Math.floor(elapsedTime) % 5 === 0 && Math.floor(elapsedTime) > 0) {
+        syncTimerState();
+    }
     
     animationFrameId = requestAnimationFrame(updateTimer);
+}
+
+// Firebase Sync Funktionen
+function initFirebaseSync() {
+    // Warte bis Firebase geladen ist
+    const checkFirebase = setInterval(() => {
+        if (window.firebaseDatabase && window.firebaseRef && window.firebaseSet && window.firebaseOnValue) {
+            clearInterval(checkFirebase);
+            setupFirebaseSync();
+        }
+    }, 100);
+}
+
+function setupFirebaseSync() {
+    if (!window.firebaseDatabase) {
+        console.warn('Firebase nicht verfügbar. Timer läuft nur lokal.');
+        return;
+    }
+    
+    const database = window.firebaseDatabase;
+    const ref = window.firebaseRef;
+    const set = window.firebaseSet;
+    const onValue = window.firebaseOnValue;
+    
+    syncRef = ref(database, 'timer/state');
+    
+    // Lausche auf Änderungen von anderen Geräten
+    onValue(syncRef, (snapshot) => {
+        if (isSyncing) return; // Verhindere Endlosschleife
+        
+        const data = snapshot.val();
+        if (!data) return;
+        
+        isSyncing = true;
+        
+        // Synchronisiere Timer-Status
+        if (data.isRunning !== isRunning) {
+            isRunning = data.isRunning;
+            startBtn.disabled = isRunning;
+            pauseBtn.disabled = !isRunning;
+        }
+        
+        if (data.startTime !== null) {
+            // Berechne elapsedTime basierend auf startTime
+            const now = Date.now();
+            const remoteElapsed = Math.floor((now - data.startTime) / 1000);
+            
+            if (Math.abs(remoteElapsed - elapsedTime) > 2) { // Nur sync wenn Unterschied > 2 Sekunden
+                startTime = data.startTime;
+                elapsedTime = remoteElapsed;
+            }
+        } else if (data.elapsedTime !== undefined) {
+            elapsedTime = data.elapsedTime;
+            startTime = null;
+        }
+        
+        // Starte/Stoppe Timer basierend auf Remote-Status
+        if (isRunning && !animationFrameId) {
+            if (startTime === null) {
+                startTime = Date.now() - (elapsedTime * 1000);
+            }
+            updateTimer();
+        } else if (!isRunning && animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
+        
+        // Aktualisiere UI
+        updateTimeline(elapsedTime);
+        updateProgress(elapsedTime);
+        updateMenu(elapsedTime);
+        
+        setTimeout(() => { isSyncing = false; }, 100);
+    });
+}
+
+function syncTimerState() {
+    if (!syncRef || !window.firebaseSet || isSyncing) return;
+    
+    isSyncing = true;
+    
+    const state = {
+        isRunning: isRunning,
+        startTime: startTime,
+        elapsedTime: elapsedTime,
+        timestamp: Date.now()
+    };
+    
+    window.firebaseSet(syncRef, state).then(() => {
+        setTimeout(() => { isSyncing = false; }, 100);
+    }).catch((error) => {
+        console.error('Sync-Fehler:', error);
+        isSyncing = false;
+    });
 }
 
 // Start
@@ -197,6 +381,7 @@ function startTimer() {
         isRunning = true;
         startBtn.disabled = true;
         pauseBtn.disabled = false;
+        syncTimerState(); // Sync zu Firebase
         updateTimer();
     }
 }
@@ -210,7 +395,9 @@ function pauseTimer() {
         pauseBtn.disabled = true;
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
         }
+        syncTimerState(); // Sync zu Firebase
     }
 }
 
@@ -224,6 +411,7 @@ function resetTimer() {
     
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
     }
     
     mainTimer.textContent = "00:00:00";
@@ -245,6 +433,9 @@ function resetTimer() {
     
     // Fortschritt zurücksetzen
     updateProgress(0);
+    updateMenu(0);
+    
+    syncTimerState(); // Sync zu Firebase
 }
 
 // Event Listeners
@@ -294,8 +485,98 @@ function renderProgressMarkers() {
     });
 }
 
+// Menü rendern
+function renderMenu() {
+    menuContainer.innerHTML = '';
+    
+    // Gruppiere Menüpunkte nach Sektionen
+    const sections = {};
+    menuData.forEach(menuItem => {
+        if (!sections[menuItem.section]) {
+            sections[menuItem.section] = [];
+        }
+        sections[menuItem.section].push(menuItem);
+    });
+    
+    // Rendere jede Sektion
+    Object.keys(sections).forEach(sectionName => {
+        const sectionDiv = document.createElement('div');
+        sectionDiv.className = 'menu-section';
+        
+        const title = document.createElement('h2');
+        title.className = 'menu-section-title';
+        title.textContent = sectionName;
+        sectionDiv.appendChild(title);
+        
+        sections[sectionName].forEach(menuItem => {
+            menuItem.items.forEach(item => {
+                const itemDiv = document.createElement('div');
+                itemDiv.className = 'menu-item';
+                itemDiv.dataset.time = menuItem.time;
+                
+                const nameDiv = document.createElement('div');
+                nameDiv.className = 'menu-item-name';
+                nameDiv.textContent = item.name;
+                itemDiv.appendChild(nameDiv);
+                
+                if (item.description) {
+                    const descDiv = document.createElement('div');
+                    descDiv.className = 'menu-item-description';
+                    descDiv.textContent = item.description;
+                    itemDiv.appendChild(descDiv);
+                }
+                
+                sectionDiv.appendChild(itemDiv);
+            });
+        });
+        
+        menuContainer.appendChild(sectionDiv);
+    });
+}
+
+// Menü aktualisieren basierend auf aktueller Zeit
+function updateMenu(currentSeconds) {
+    const menuItems = menuContainer.querySelectorAll('.menu-item');
+    
+    menuItems.forEach(item => {
+        const itemTime = parseInt(item.dataset.time);
+        const timeWindow = 300; // 5 Minuten Zeitfenster, in dem das Gericht aktiv ist
+        
+        // Entferne aktive Klasse von allen Items
+        item.classList.remove('active');
+        
+        // Setze aktiv, wenn wir im Zeitfenster sind
+        if (currentSeconds >= itemTime && currentSeconds < itemTime + timeWindow) {
+            item.classList.add('active');
+        }
+    });
+}
+
+// Tab-Switching
+function initTabs() {
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabContents = document.querySelectorAll('.tab-content');
+    
+    tabButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const targetTab = button.dataset.tab;
+            
+            // Entferne active von allen
+            tabButtons.forEach(btn => btn.classList.remove('active'));
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            // Setze active auf geklicktes Tab
+            button.classList.add('active');
+            document.getElementById(`${targetTab}Tab`).classList.add('active');
+        });
+    });
+}
+
 // Initialisierung
 renderTimeline();
 renderProgressMarkers();
+renderMenu();
+initTabs();
+initFirebaseSync(); // Firebase Sync initialisieren
 resetTimer();
 
